@@ -1,182 +1,169 @@
 #include <Arduino.h>
 
-// Pin Definitions
-const int centreIRPin = 16;
-const int sideIRPin   = 12;
-const int trigPin     = 15;
-const int echoPin     = 14;
+// VERSION STATUS
+// centreIR and distance thingy working
+// Smoother forward movement, increment-based sweep turns, slightly higher PWM
 
+// wheel diameter: 3.3
+// define pins
+const int centreIRPin = 16; 
+const int sideIRPin = 12;   
+const int trigPin = 15; 
+const int echoPin = 14;
+
+// Motor Driver Pins
 // Left Motor (Motor A)
-const int enA = 4;
-const int in1 = 2;
-const int in2 = 3;
+const int enA = 4;  // Speed control (Needs PWM ~ pin)
+const int in1 = 2;  // Direction Pin 1
+const int in2 = 3;  // Direction Pin 2
 
 // Right Motor (Motor B)
-const int enB = 8;
-const int in3 = 6;
-const int in4 = 7;
+const int enB = 8; // Speed control (Needs PWM ~ pin)
+const int in3 = 6;  // Direction Pin 1
+const int in4 = 7;  // Direction Pin 2
 
-// --- Tunable Speeds (0 - 255) ---
-const int forwardSpeed   = 185; // Slightly lower than 225 so it doesn't overshoot curves
-const int curveOuterSpd  = 180; // Left wheel speed when arcing smoothly around a right curve
-const int pivotFastSpd   = 165; // Outer wheel speed during sweep recovery
-const int pivotInsideSpd = 125; // Inner reverse wheel speed (slower so pivot stays on the line)
+// --- Memory Flag for Line Following ---
+bool sawLineOnRight = false; // Remembers if the line was last seen on the right
 
-// --- Timing & Memory ---
-unsigned long lastRightSeenTime = 0;
-const unsigned long rightMemoryWindow = 400; // Remember right line for 400 ms
-const unsigned long leftSearchMaxTime = 160; // Max ms to check left before sweeping right
+float duration, distance;
 
-unsigned long lastSonarTime = 0;
-float distance = 999.0;
+// --- Movement Settings ---
+const int motorSpeed = 225; // Increased PWM slightly from 215
 
-// Helper function to set both motors cleanly (-255 to +255)
-void setMotors(int leftSpd, int rightSpd) {
-  // Left Motor
-  if (leftSpd >= 0) {
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, HIGH);
-    analogWrite(enA, leftSpd);
-  } else {
-    digitalWrite(in1, HIGH);
-    digitalWrite(in2, LOW);
-    analogWrite(enA, -leftSpd);
-  }
+// Forward movement settings (faster/less jerky)
+const int forwardStepTime = 50;  
+const int forwardPauseTime = 5;  // Reduced to 5ms so it pauses for a shorter time between increments
 
-  // Right Motor
-  if (rightSpd >= 0) {
-    digitalWrite(in3, LOW);
-    digitalWrite(in4, HIGH);
-    analogWrite(enB, rightSpd);
-  } else {
-    digitalWrite(in3, HIGH);
-    digitalWrite(in4, LOW);
-    analogWrite(enB, -rightSpd);
-  }
-}
+// Turn sweep settings (incremental sweeping)
+const int turnStepTime = 40;  // How long motors run during a sweep increment
+const int turnPauseTime = 20; // How long motors stop to check the line during a sweep
+const int turnOvershoot = 30; // Milliseconds to keep turning AFTER finding the line (to center it comfortably)
 
-// Micro-pulse the motors so high static friction doesn't stall them at lower speeds
-void updateUltrasonic() {
-  if (millis() - lastSonarTime >= 100) { // Check sonar only 10x/sec so IR stays fast
-    lastSonarTime = millis();
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
-
-    // 15,000 us timeout (~2.5m) prevents loop freezes
-    unsigned long dur = pulseIn(echoPin, HIGH, 15000);
-    if (dur > 0) {
-      distance = (dur * 0.0343f) / 2.0f;
-    }
-  }
-}
 
 void setup() {
   Serial.begin(115200);
   pinMode(centreIRPin, INPUT);
   pinMode(sideIRPin, INPUT);
 
+  // Ultrasonic
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
 
+  // Set all motor control pins to outputs
   pinMode(enA, OUTPUT);
   pinMode(in1, OUTPUT);
   pinMode(in2, OUTPUT);
-
+  
   pinMode(enB, OUTPUT);
   pinMode(in3, OUTPUT);
   pinMode(in4, OUTPUT);
-
-  setMotors(0, 0);
+  
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
 }
 
 void loop() {
-  updateUltrasonic();
+  // 1. READ SENSORS
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+  distance = (duration*.0343)/2;
 
   int centerState = digitalRead(centreIRPin);
-  int rightState  = digitalRead(sideIRPin);
-  unsigned long now = millis();
+  int rightState = digitalRead(sideIRPin);
 
-  // Always latch the timestamp whenever the right sensor sees black
-  if (rightState == HIGH) {
-    lastRightSeenTime = now;
-  }
-
-  // CASE 1: Both Center and Right see black -> Curve is bending RIGHT right now!
-  // Steer smoothly to the right immediately instead of driving straight past it.
-  if (centerState == HIGH && rightState == HIGH) {
-    Serial.println("ARCING RIGHT ON CURVE");
-    setMotors(curveOuterSpd, 0); // Left wheel pushes forward, right wheel acts as pivot
-    delay(8);
-  }
-  // CASE 2: Only Center sees black -> Straight ahead
-  else if (centerState == HIGH && rightState == LOW) {
-    Serial.println("FWD - ON LINE");
-    setMotors(forwardSpeed, forwardSpeed);
-    delay(8);
-  }
-  // CASE 3: Center lost the line, but Right sensor sees it NOW (or saw it within 400ms)
-  else if (rightState == HIGH || (now - lastRightSeenTime <= rightMemoryWindow)) {
-    Serial.println("SWEEPING RIGHT (FAST 1ms POLLING)");
-
-    // Spin right continuously while polling sensors every 1 ms
-    while (digitalRead(centreIRPin) == LOW) {
-      // If right sensor is currently on the tape, we are close: do a smoother arc
-      if (digitalRead(sideIRPin) == HIGH) {
-        lastRightSeenTime = millis();
-        setMotors(pivotFastSpd, -90);
-      } else {
-        // Right sensor passed it, pivot sharper until center catches up
-        setMotors(pivotFastSpd, -pivotInsideSpd);
-      }
-      delay(1);
-    }
-
-    // Brief 15ms counter-brake to kill rotational momentum right on the line
-    setMotors(-120, 120);
-    delay(15);
-    setMotors(0, 0);
-    lastRightSeenTime = 0; // Clear memory once centered
-  }
-  // CASE 4: Neither sensor sees black -> Try a quick Left check first; if not found, sweep Right!
-  else {
-    Serial.println("SEARCHING LEFT FIRST");
-    unsigned long searchStart = millis();
-    bool foundLine = false;
-
-    // 4A: Sweep left for up to 160ms checking every 1ms
-    while (millis() - searchStart < leftSearchMaxTime) {
-      if (digitalRead(centreIRPin) == HIGH) {
-        foundLine = true;
-        break;
-      }
-      if (digitalRead(sideIRPin) == HIGH) {
-        // The line actually showed up on the right! Break out and let Case 3 handle it
-        lastRightSeenTime = millis();
-        foundLine = true;
-        break;
-      }
-      setMotors(-pivotInsideSpd, pivotFastSpd);
-      delay(1);
-    }
-
-    if (foundLine) {
-      // Brief counter-brake to stop left spin right on the tape
-      setMotors(120, -120);
-      delay(12);
-      setMotors(0, 0);
+  // 2. DETERMINE NEXT MOVEMENT
+  
+  if (centerState == HIGH) {
+    // === PATH DIRECTLY FORWARD EXISTS === 
+    
+    if (rightState == HIGH) {
+      sawLineOnRight = true; // Remember fake/real side paths just in case
     } else {
-      // 4B: Line wasn't on the left -> It slipped into the gap between Center and Right!
-      Serial.println("GAP DETECTED -> SWEEPING RIGHT");
+      sawLineOnRight = false; // Passed the junction, forget it!
+    }
+    
+    // Drive forward
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+    
+    analogWrite(enA, motorSpeed); 
+    analogWrite(enB, motorSpeed);
+    Serial.println("FWD - LINE DETECTED");
+    
+    // Execute smooth forward step
+    delay(forwardStepTime); 
+    analogWrite(enA, 0); 
+    analogWrite(enB, 0); 
+    delay(forwardPauseTime); 
+    
+  } else {
+    // === NO PATH DIRECTLY FORWARD (LOST THE LINE) ===
+    
+    if (sawLineOnRight || rightState == HIGH) {
+      // TURN RIGHT IN INCREMENTS UNTIL LINE IS FOUND
+      Serial.println("SWEEPING RIGHT TO RECOVER LINE");
+      digitalWrite(in1, LOW);
+      digitalWrite(in2, HIGH);
+      digitalWrite(in3, HIGH);
+      digitalWrite(in4, LOW);
+      
+      // Trap the robot in this loop until the sensor sees black again
       while (digitalRead(centreIRPin) == LOW) {
-        setMotors(pivotFastSpd, -pivotInsideSpd);
-        delay(1);
+        analogWrite(enA, motorSpeed); 
+        analogWrite(enB, motorSpeed);
+        delay(turnStepTime); // Turn briefly
+        
+        analogWrite(enA, 0); 
+        analogWrite(enB, 0);
+        delay(turnPauseTime); // Pause to check cleanly
       }
-      setMotors(-120, 120);
-      delay(15);
-      setMotors(0, 0);
+      
+      // Comfortably center it: keep turning for just a fraction of a second longer
+      analogWrite(enA, motorSpeed); 
+      analogWrite(enB, motorSpeed);
+      delay(turnOvershoot); 
+      
+      // Stop and reset the memory flag
+      analogWrite(enA, 0); 
+      analogWrite(enB, 0); 
+      sawLineOnRight = false; 
+      
+    } else {
+      // TURN LEFT IN INCREMENTS UNTIL LINE IS FOUND
+      Serial.println("SWEEPING LEFT TO RECOVER LINE");
+      digitalWrite(in1, HIGH); 
+      digitalWrite(in2, LOW); 
+      digitalWrite(in3, LOW);
+      digitalWrite(in4, HIGH);
+      
+      // Trap the robot in this loop until the sensor sees black again
+      while (digitalRead(centreIRPin) == LOW) {
+        analogWrite(enA, motorSpeed); 
+        analogWrite(enB, motorSpeed);
+        delay(turnStepTime); // Turn briefly
+        
+        analogWrite(enA, 0); 
+        analogWrite(enB, 0);
+        delay(turnPauseTime); // Pause to check cleanly
+      }
+      
+      // Comfortably center it: keep turning for just a fraction of a second longer
+      analogWrite(enA, motorSpeed); 
+      analogWrite(enB, motorSpeed);
+      delay(turnOvershoot); 
+      
+      // Stop
+      analogWrite(enA, 0); 
+      analogWrite(enB, 0); 
     }
   }
 }
