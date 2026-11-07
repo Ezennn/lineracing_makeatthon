@@ -1,11 +1,6 @@
 #include <Arduino.h>
 
-// VERSION STATUS
-// centreIR and distance thingy working
-// Smoother forward movement, increment-based sweep turns, slightly higher PWM
-
-// wheel diameter: 3.3
-// define pins
+// Define pins
 const int centreIRPin = 16; 
 const int sideIRPin = 12;   
 const int trigPin = 15; 
@@ -13,32 +8,48 @@ const int echoPin = 14;
 
 // Motor Driver Pins
 // Left Motor (Motor A)
-const int enA = 4;  // Speed control (Needs PWM ~ pin)
+const int enA = 4;  // Speed control (PWM)
 const int in1 = 2;  // Direction Pin 1
 const int in2 = 3;  // Direction Pin 2
 
 // Right Motor (Motor B)
-const int enB = 8; // Speed control (Needs PWM ~ pin)
+const int enB = 8;  // Speed control (PWM)
 const int in3 = 6;  // Direction Pin 1
 const int in4 = 7;  // Direction Pin 2
 
-// --- Memory Flag for Line Following ---
-bool sawLineOnRight = false; // Remembers if the line was last seen on the right
+// --- Memory Counter for Right Line Following ---
+int rightMemorySteps = 0; 
 
 float duration, distance;
 
 // --- Movement Settings ---
-const int motorSpeed = 225; // Increased PWM slightly from 215
+const int forwardSpeed = 210; // Straight forward PWM (Original: 225)
+const int turnSpeed = 180;    // Sweep turn PWM (Original: 190)
 
-// Forward movement settings (faster/less jerky)
-const int forwardStepTime = 50;  
-const int forwardPauseTime = 5;  // Reduced to 5ms so it pauses for a shorter time between increments
+// Forward movement step-and-pause settings
+const int forwardStepTime = 45;       // Normal straight step duration (ms)
+const int intersectionCheckTime = 60; // How long to go straight forward when right sensor triggers to check if forward path exists
+const int forwardPauseTime = 15;      // Pause time with motors OFF between steps (ms)
 
-// Turn sweep settings (incremental sweeping)
-const int turnStepTime = 40;  // How long motors run during a sweep increment
-const int turnPauseTime = 20; // How long motors stop to check the line during a sweep
-const int turnOvershoot = 30; // Milliseconds to keep turning AFTER finding the line (to center it comfortably)
+// Turn sweep settings (incremental stepping)
+const int turnStepTime = 25;  // Duration of each sweep increment (ms)
+const int turnPauseTime = 15; // Pause between sweep increments (ms)
+const int turnOvershoot = 15; // Extra centering time after finding the line (ms)
 
+// Helper to run a single turn increment while watching the center sensor
+void runTurnStep(int stepMs) {
+  analogWrite(enA, turnSpeed); 
+  analogWrite(enB, turnSpeed);
+  for (int i = 0; i < stepMs; i++) {
+    if (digitalRead(centreIRPin) == HIGH) {
+      break; // Stop the step early the exact millisecond the line is found
+    }
+    delay(1);
+  }
+  analogWrite(enA, 0); 
+  analogWrite(enB, 0);
+  delay(turnPauseTime); // Pause cleanly with motors OFF
+}
 
 void setup() {
   Serial.begin(115200);
@@ -72,34 +83,60 @@ void loop() {
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
 
-  duration = pulseIn(echoPin, HIGH);
-  distance = (duration*.0343)/2;
+  duration = pulseIn(echoPin, HIGH, 25000);
+  distance = (duration * 0.0343) / 2;
 
   int centerState = digitalRead(centreIRPin);
   int rightState = digitalRead(sideIRPin);
 
-  // 2. DETERMINE NEXT MOVEMENT
-  
+  // 2. INTERSECTION / RIGHT-TURN VERIFICATION
+  // When the right sensor outputs HIGH, go a little forward first and re-check if a forward path exists
+  if (rightState == HIGH) {
+    Serial.println("RIGHT DETECTED -> STEPPING FORWARD TO CHECK IF STRAIGHT PATH EXISTS");
+    rightMemorySteps = 3; // Remember the right line in case the straight path ends right after this step
+
+    // Drive straight forward a little bit
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+    analogWrite(enA, forwardSpeed); 
+    analogWrite(enB, forwardSpeed);
+    delay(intersectionCheckTime);
+
+    // Stop motors cleanly before re-reading the front sensor
+    analogWrite(enA, 0); 
+    analogWrite(enB, 0);
+    delay(forwardPauseTime);
+
+    // Re-read sensors at the new position slightly further forward
+    centerState = digitalRead(centreIRPin);
+    rightState = digitalRead(sideIRPin);
+
+    // If a path forward STILL exists and we cleared the right branch, cancel the right turn
+    if (centerState == HIGH && rightState == LOW) {
+      Serial.println("STRAIGHT PATH EXISTS PAST INTERSECTION -> CONTINUING FORWARD");
+      rightMemorySteps = 0;
+    }
+  }
+
+  // 3. DETERMINE NEXT MOVEMENT
   if (centerState == HIGH) {
     // === PATH DIRECTLY FORWARD EXISTS === 
-    
-    if (rightState == HIGH) {
-      sawLineOnRight = true; // Remember fake/real side paths just in case
-    } else {
-      sawLineOnRight = false; // Passed the junction, forget it!
-    }
-    
-    // Drive forward
+    Serial.println("FWD - LINE DETECTED");
     digitalWrite(in1, LOW);
     digitalWrite(in2, HIGH);
     digitalWrite(in3, LOW);
     digitalWrite(in4, HIGH);
     
-    analogWrite(enA, motorSpeed); 
-    analogWrite(enB, motorSpeed);
-    Serial.println("FWD - LINE DETECTED");
+    analogWrite(enA, forwardSpeed); 
+    analogWrite(enB, forwardSpeed);
+
+    if (rightState == LOW && rightMemorySteps > 0) {
+      rightMemorySteps--; // Count down memory while moving straight
+    }
     
-    // Execute smooth forward step
+    // Execute pulsed forward step, then turn motors OFF
     delay(forwardStepTime); 
     analogWrite(enA, 0); 
     analogWrite(enB, 0); 
@@ -108,34 +145,28 @@ void loop() {
   } else {
     // === NO PATH DIRECTLY FORWARD (LOST THE LINE) ===
     
-    if (sawLineOnRight || rightState == HIGH) {
+    if (rightMemorySteps > 0 || rightState == HIGH) {
       // TURN RIGHT IN INCREMENTS UNTIL LINE IS FOUND
-      Serial.println("SWEEPING RIGHT TO RECOVER LINE");
+      Serial.println("NO FORWARD PATH -> SWEEPING RIGHT TO RECOVER LINE");
       digitalWrite(in1, LOW);
       digitalWrite(in2, HIGH);
       digitalWrite(in3, HIGH);
       digitalWrite(in4, LOW);
       
-      // Trap the robot in this loop until the sensor sees black again
+      // Incremental step-and-pause loop
       while (digitalRead(centreIRPin) == LOW) {
-        analogWrite(enA, motorSpeed); 
-        analogWrite(enB, motorSpeed);
-        delay(turnStepTime); // Turn briefly
-        
-        analogWrite(enA, 0); 
-        analogWrite(enB, 0);
-        delay(turnPauseTime); // Pause to check cleanly
+        runTurnStep(turnStepTime);
       }
       
-      // Comfortably center it: keep turning for just a fraction of a second longer
-      analogWrite(enA, motorSpeed); 
-      analogWrite(enB, motorSpeed);
+      // Small centering pulse
+      analogWrite(enA, turnSpeed); 
+      analogWrite(enB, turnSpeed);
       delay(turnOvershoot); 
       
-      // Stop and reset the memory flag
+      // Stop and reset the memory counter
       analogWrite(enA, 0); 
       analogWrite(enB, 0); 
-      sawLineOnRight = false; 
+      rightMemorySteps = 0; 
       
     } else {
       // TURN LEFT IN INCREMENTS UNTIL LINE IS FOUND
@@ -145,21 +176,26 @@ void loop() {
       digitalWrite(in3, LOW);
       digitalWrite(in4, HIGH);
       
-      // Trap the robot in this loop until the sensor sees black again
-      while (digitalRead(centreIRPin) == LOW) {
-        analogWrite(enA, motorSpeed); 
-        analogWrite(enB, motorSpeed);
-        delay(turnStepTime); // Turn briefly
-        
-        analogWrite(enA, 0); 
-        analogWrite(enB, 0);
-        delay(turnPauseTime); // Pause to check cleanly
+      // Incremental step-and-pause loop (max 12 steps left; if not found, switch to right)
+      int leftSteps = 0;
+      while (digitalRead(centreIRPin) == LOW && leftSteps < 12) {
+        if (digitalRead(sideIRPin) == HIGH) {
+          rightMemorySteps = 3; // Spotted the line on the right!
+          break;
+        }
+        runTurnStep(turnStepTime);
+        leftSteps++;
       }
-      
-      // Comfortably center it: keep turning for just a fraction of a second longer
-      analogWrite(enA, motorSpeed); 
-      analogWrite(enB, motorSpeed);
-      delay(turnOvershoot); 
+
+      // If 12 left steps didn't find the line, it slipped between the two sensors -> sweep right next
+      if (digitalRead(centreIRPin) == LOW) {
+        rightMemorySteps = 3;
+      } else {
+        // Comfortably center it on left recovery
+        analogWrite(enA, turnSpeed); 
+        analogWrite(enB, turnSpeed);
+        delay(turnOvershoot); 
+      }
       
       // Stop
       analogWrite(enA, 0); 
