@@ -2,7 +2,7 @@
 
 // VERSION STATUS
 // centreIR and distance thingy working
-// Quick-left check before right sweep (reduced to 25ms), extended overshoot for long right turns
+// Quick-left check before right sweep (halved check time), extended overshoot for long right turns
 
 // wheel diameter: 3.3
 // define pins
@@ -36,11 +36,11 @@ const int forwardPauseTime = 3;
 
 // Turn sweep settings 
 const int turnStepTime = 40;  
-const int turnPauseTime = 15; 
+const int turnPauseTime = 20; 
 const int turnOvershoot = 30; // Standard overshoot to comfortably center
 
 // Advanced Turn Settings
-const int leftCheckTime = 20;        // REDUCED: Very quick left twitch before a right turn
+const int leftCheckTime = 40;        // HALVED: Quick left twitch before a right turn
 const int longTurnThreshold = 500;   // Milliseconds before a turn is considered "long"
 const int longTurnOvershoot = 200;   // Extended overshoot if the turn was long
 
